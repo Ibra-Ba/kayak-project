@@ -104,7 +104,7 @@ def compute_weather_score(df_weather: pd.DataFrame) -> pd.DataFrame:
     Agrège les 7 jours et calcule un score météo par ville.
 
     Formule : score = temp_moy - (pop_moy × 10) - (rain_total × 0.5)
-    Modifiable selon tes critères dans ce fichier.
+    Modifiable selon  critères choisis dans ce fichier.
 
     Retourne
     --------

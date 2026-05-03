@@ -14,30 +14,26 @@ RGPD : uniquement des données publiques (nom, score, coordonnées, description)
 Aucune donnée personnelle d'utilisateur collectée.
 """
 
-import time
+import json
+import os
 import random
 import re
+import time
 from pathlib import Path
 
 import pandas as pd
 from bs4 import BeautifulSoup
-
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-import os
-import time
-
 
 CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "raw" / "hotels_cache.csv"
 
 
-
+# ──────────────────────────────────────────────
 # Cache
+# ──────────────────────────────────────────────
 
 def _load_cache() -> pd.DataFrame:
     if CACHE_PATH.exists():
@@ -50,111 +46,214 @@ def _save_cache(df: pd.DataFrame) -> None:
     df.to_csv(CACHE_PATH, index=False)
 
 
-
+# ──────────────────────────────────────────────
 # Driver
+# ──────────────────────────────────────────────
 
 def get_driver(headless: bool = True) -> webdriver.Chrome:
+    """Crée un driver Chrome configuré pour minimiser la détection."""
     options = Options()
     if headless:
         options.add_argument("--headless=new")
-    
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    
-    try:
-        service = Service() 
-        driver = webdriver.Chrome(service=service, options=options)
-    except Exception as e:
-        print(f"Erreur au lancement du driver : {e}")
-        # Si ça échoue encore, on tente de forcer le chemin (si tu as installé chromedriver manuellement)
-        # service = Service("/usr/bin/chromedriver") 
-        # driver = webdriver.Chrome(service=service, options=options)
-        raise e
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    )
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
 
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    service = Service()
+    driver  = webdriver.Chrome(service=service, options=options)
+    driver.execute_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
     return driver
 
-# URL
 
-# Dans scraper.py
-def build_booking_url(city: str) -> str:
-    # URL ultra-simple : juste la ville et la langue
-    return f"https://www.booking.com/searchresults.fr.html?ss={city.replace(' ', '+')}&lang=fr"
+# ──────────────────────────────────────────────
+# Détails d'un hôtel (page individuelle)
+# ──────────────────────────────────────────────
+
+def get_hotel_details(driver, url: str) -> dict:
+    """
+    Visite la page individuelle d'un hôtel pour récupérer
+    coordonnées GPS et description.
+
+    Retourne dict : {lat, lon, description}
+    """
+    result = {"lat": None, "lon": None, "description": None}
+
+    if not url:
+        return result
+
+    driver.get(url)
+    time.sleep(random.uniform(2, 3))
+
+    soup     = BeautifulSoup(driver.page_source, "lxml")
+    html_raw = str(soup)
+
+    # ── Coordonnées GPS depuis le HTML brut ──
+    lat_match = re.search(r'"latitude"\s*:\s*([-\d.]+)', html_raw)
+    lon_match = re.search(r'"longitude"\s*:\s*([-\d.]+)', html_raw)
+    if lat_match and lon_match:
+        try:
+            result["lat"] = float(lat_match.group(1))
+            result["lon"] = float(lon_match.group(1))
+        except ValueError:
+            pass
+
+    # ── Description depuis JSON-LD ──
+    for script in soup.select('script[type="application/ld+json"]'):
+        if not script.string:
+            continue
+        try:
+            data = json.loads(script.string)
+            if isinstance(data, list):
+                data = data[0]
+            desc = data.get("description")
+            if desc:
+                result["description"] = desc[:500]
+                break
+        except (json.JSONDecodeError, KeyError, IndexError):
+            continue
+
+    return result
 
 
+# ──────────────────────────────────────────────
+# Helpers extraction carte hôtel
+# ──────────────────────────────────────────────
+
+def _extract_hotel_url(card) -> str | None:
+    """Extrait l'URL de la page hôtel depuis une carte de résultats."""
+    link = card.select_one('a[data-testid="title-link"]')
+    if not link:
+        return None
+    href = link.get("href", "")
+    if not href:
+        return None
+    if not href.startswith("http"):
+        href = "https://www.booking.com" + href
+    return href
+
+
+def _extract_score(raw_text: str) -> float | None:
+    """Extrait le score depuis le texte brut d'une carte."""
+    match = re.search(r"(\d[.,]\d)", raw_text)
+    if match:
+        try:
+            return float(match.group(1).replace(",", "."))
+        except ValueError:
+            pass
+    return None
+
+
+def _extract_distance(card, raw_text: str) -> str | None:
+    """Extrait la distance au centre depuis une carte."""
+    dist_el = card.select_one('[data-testid="distance"]')
+    if dist_el:
+        return dist_el.get_text(strip=True)
+    match = re.search(r"(\d+[.,]?\d*\s?k?m)\s?du centre", raw_text)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _extract_price(card) -> int | None:
+    """Extrait le prix depuis une carte hôtel."""
+    for selector in [
+        'span.b87c397a13.f2f358d1de',
+        '[data-testid="price-and-discounted-price"]'
+    ]:
+        price_el = card.select_one(selector)
+        if not price_el:
+            continue
+        nums = re.findall(
+            r"\d+",
+            price_el.get_text(strip=True).replace("\xa0", "").replace(" ", "")
+        )
+        if nums:
+            try:
+                return int("".join(nums))
+            except ValueError:
+                continue
+    return None
+
+
+# ──────────────────────────────────────────────
+# Scraping d'une ville
+# ──────────────────────────────────────────────
 
 def _scrape_city(driver, city: str, city_id: int, max_hotels: int) -> list:
-    # Paramètres de recherche fixés selon tes critères
-    adults, children, rooms = 1, 0, 1
+    """
+    Scrape les hôtels d'une ville :
+    1. Page de résultats → nom, score, distance, prix, URL
+    2. Page individuelle → coordonnées GPS, description
+    """
     checkin, checkout = "2026-07-10", "2026-07-12"
-    
     url = (
         f"https://www.booking.com/searchresults.fr.html?ss={city}"
         f"&checkin={checkin}&checkout={checkout}"
-        f"&group_adults={adults}&no_rooms={rooms}&group_children={children}"
+        f"&group_adults=1&no_rooms=1&group_children=0"
         f"&lang=fr"
     )
-    
-    driver.get(url)
-    time.sleep(5) 
 
-    # Fermeture du pop-up si présent
+    driver.get(url)
+    time.sleep(5)
+
+    # Fermer le pop-up de connexion si présent
     try:
-        driver.find_element(By.CSS_SELECTOR, 'button[aria-label="Ignorer les informations de connexion"]').click()
-    except:
+        btn = driver.find_element(
+            By.CSS_SELECTOR,
+            'button[aria-label="Ignorer les informations de connexion"]'
+        )
+        btn.click()
+        time.sleep(1)
+    except Exception:
         pass
 
-    cards = driver.find_elements(By.CSS_SELECTOR, '[data-testid="property-card"]')
+    soup  = BeautifulSoup(driver.page_source, "lxml")
+    cards = soup.select('[data-testid="property-card"]')[:max_hotels]
     hotels = []
 
-    for card in cards[:max_hotels]:
-        try:
-            raw_text = card.text
-            name = raw_text.split('\n')[0]
+    for card in cards:
+        raw_text = card.get_text(separator="\n", strip=True)
+        name     = raw_text.split('\n')[0] if raw_text else None
 
-            # Score
-            score = None
-            score_match = re.search(r"(\d[.,]\d)", raw_text)
-            if score_match:
-                score = float(score_match.group(1).replace(",", "."))
-
-            # Distance
-            distance = None
-            try:
-                distance = card.find_element(By.CSS_SELECTOR, '[data-testid="distance"]').text
-            except:
-                dist_match = re.search(r"(\d+[.,]?\d*\s?k?m)\s?du centre", raw_text)
-                if dist_match: distance = dist_match.group(1)
-
-            # Prix (Sélecteurs robustes)
-            price = None
-            price_text = ""
-            for selector in ['span.b87c397a13.f2f358d1de', '[data-testid="price-and-discounted-price"]']:
-                try:
-                    el = card.find_element(By.CSS_SELECTOR, selector)
-                    if el.is_displayed():
-                        price_text = el.text
-                        break
-                except:
-                    continue
-
-            if price_text:
-                nums = re.findall(r"\d+", price_text.replace("\xa0", "").replace(" ", ""))
-                if nums: price = int("".join(nums))
-
-            hotels.append({
-                "city_id": city_id,
-                "city": city,
-                "hotel_name": name,
-                "score": score,
-                "distance": distance,
-                "price_eur": price
-            })
-        except:
+        if not name:
             continue
-            
+
+        hotel_url = _extract_hotel_url(card)
+        score     = _extract_score(raw_text)
+        distance  = _extract_distance(card, raw_text)
+        price_eur = _extract_price(card)
+
+        # Visite page individuelle → GPS + description
+        details = get_hotel_details(driver, hotel_url)
+        time.sleep(random.uniform(1, 2))
+
+        hotels.append({
+            "city_id":     city_id,
+            "city":        city,
+            "hotel_name":  name,
+            "url":         hotel_url,
+            "score":       score,
+            "distance":    distance,
+            "price_eur":   price_eur,
+            "lat":         details["lat"],
+            "lon":         details["lon"],
+            "description": details["description"],
+        })
+
     return hotels
+
+
 # ──────────────────────────────────────────────
 # Point d'entrée principal
 # ──────────────────────────────────────────────
@@ -166,42 +265,40 @@ def scrape_all_cities(
     delay_range: tuple = (2, 5),
     force_refresh: bool = False
 ) -> pd.DataFrame:
-    
-    cache_path = "data/raw/hotels_cache.csv"
-    
-    # Gestion du cache
-    if not force_refresh and os.path.exists(cache_path):
-        print("Chargement des données depuis le cache...")
-        return pd.read_csv(cache_path)
+    """
+    Scrape les hôtels de toutes les villes avec cache local.
 
-    driver = get_driver(headless=headless)
+    Paramètres
+    ----------
+    df_cities           : DataFrame city_id, city
+    max_hotels_per_city : limite par ville
+    headless            : False = Chrome visible (debug)
+    delay_range         : délai aléatoire entre villes (anti-détection)
+    force_refresh       : True = ignore le cache et re-scrape tout
+    """
+    if not force_refresh and CACHE_PATH.exists():
+        print("Cache trouvé — chargement direct")
+        return pd.read_csv(CACHE_PATH)
+
+    driver     = get_driver(headless=headless)
     all_hotels = []
 
     try:
         for _, row in df_cities.iterrows():
             print(f"Scraping : {row['city']}...", end=" ", flush=True)
-            
             city_hotels = _scrape_city(
-                driver, 
-                city=row["city"], 
-                city_id=row["city_id"], 
+                driver,
+                city=row["city"],
+                city_id=row["city_id"],
                 max_hotels=max_hotels_per_city
             )
-            
             all_hotels.extend(city_hotels)
             print(f"OK ({len(city_hotels)} hôtels)")
-            
-            # Pause aléatoire pour éviter le ban
             time.sleep(random.uniform(*delay_range))
-
     finally:
         driver.quit()
 
     df_result = pd.DataFrame(all_hotels)
-    
-    # Sauvegarde
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    df_result.to_csv(cache_path, index=False)
-    print(f"\nTerminé ! {len(df_result)} hôtels sauvegardés dans {cache_path}")
-    
+    _save_cache(df_result)
+    print(f"\nTerminé : {len(df_result)} hôtels sauvegardés")
     return df_result

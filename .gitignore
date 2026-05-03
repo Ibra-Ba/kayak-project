@@ -9,3 +9,4 @@ __pycache__/
 tmp/
 hotels_selenium.csv
 notebooks/data/
+secrets.sh
