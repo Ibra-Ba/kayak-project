@@ -143,14 +143,35 @@ def _extract_hotel_url(card) -> str | None:
     return href
 
 
-def _extract_score(raw_text: str) -> float | None:
-    """Extrait le score depuis le texte brut d'une carte."""
-    match = re.search(r"(\d[.,]\d)", raw_text)
-    if match:
-        try:
-            return float(match.group(1).replace(",", "."))
-        except ValueError:
-            pass
+
+def _extract_score(card) -> float | None:
+
+    selectors = [
+        "p.review_score_value",
+        '[data-testid="review-score"]',
+        '[data-testid="review-score-right-component"]'
+    ]
+
+    for selector in selectors:
+
+        score_el = card.select_one(selector)
+
+        if not score_el:
+            continue
+
+        match = re.search(
+            r"(\d+[.,]\d+)",
+            score_el.get_text(" ", strip=True)
+        )
+
+        if match:
+            try:
+                return float(
+                    match.group(1).replace(",", ".")
+                )
+            except ValueError:
+                pass
+
     return None
 
 
@@ -230,7 +251,7 @@ def _scrape_city(driver, city: str, city_id: int, max_hotels: int) -> list:
             continue
 
         hotel_url = _extract_hotel_url(card)
-        score     = _extract_score(raw_text)
+        score     = _extract_score(card)
         distance  = _extract_distance(card, raw_text)
         price_eur = _extract_price(card)
 

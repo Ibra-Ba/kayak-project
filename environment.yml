@@ -19,3 +19,4 @@ dependencies:
       - jupyter==1.0.0
       - ipykernel==6.27.1
       - lxml==4.9.4
+      - scikit-learn

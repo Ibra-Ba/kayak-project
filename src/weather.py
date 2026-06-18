@@ -99,35 +99,51 @@ def collect_weather_data(df_cities: pd.DataFrame, api_key: str, delay: float = 0
     return df
 
 
+from sklearn.preprocessing import MinMaxScaler
+
 def compute_weather_score(df_weather: pd.DataFrame) -> pd.DataFrame:
     """
     Agrège les 7 jours et calcule un score météo par ville.
 
-    Formule : score = temp_moy - (pop_moy × 10) - (rain_total × 0.5)
-    Modifiable selon  critères choisis dans ce fichier.
+    Formule : score = (temp_norm × 0.5) - (pop_norm × 0.3) - (rain_norm × 0.2)
+
+    - pop  = Probability Of Precipitation (0–1), PAS une population
+    - Les 3 features sont normalisées [0, 1] avant pondération
+    - Les poids somment à 1 et sont modifiables ci-dessous
 
     Retourne
     --------
     DataFrame une ligne par ville, triée par score décroissant.
     """
+    # --- Poids modifiables ---
+    W_TEMP = 0.5
+    W_POP  = 0.3
+    W_RAIN = 0.2
+
     df_score = (
         df_weather
         .groupby(["city_id", "city", "lat", "lon"])
         .agg(
             temp_moy   =("temp_day", "mean"),
             temp_max   =("temp_max", "max"),
-            pop_moy    =("pop",      "mean"),
+            pop_moy    =("pop",      "mean"),   # Probability Of Precipitation
             rain_total =("rain_mm",  "sum"),
             humidity   =("humidity", "mean")
         )
         .reset_index()
     )
 
+    # Normalisation [0, 1] sur chaque feature
+    scaler = MinMaxScaler()
+    df_score[["temp_norm", "pop_norm", "rain_norm"]] = scaler.fit_transform(
+        df_score[["temp_moy", "pop_moy", "rain_total"]]
+    )
+
     df_score["weather_score"] = (
-        df_score["temp_moy"]
-        - df_score["pop_moy"] * 10
-        - df_score["rain_total"] * 0.5
-    ).round(2)
+          df_score["temp_norm"] * W_TEMP
+        - df_score["pop_norm"]  * W_POP
+        - df_score["rain_norm"] * W_RAIN
+    ).round(4)
 
     df_score = (
         df_score

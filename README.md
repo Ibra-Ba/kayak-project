@@ -115,7 +115,7 @@ sudo apt update && sudo apt install -y google-chrome-stable
 
 ```bash
 cp .env.example .env
-# Remplir .env avec vos clés API et credentials AWS
+# Remplir .env avec les clés API et credentials AWS
 ```
 
 ### 5. Ouvrir dans VSCode
