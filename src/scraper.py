@@ -175,6 +175,37 @@ def _extract_score(card) -> float | None:
     return None
 
 
+def _extract_review_count(card) -> int | None:
+
+    text = card.get_text(" ", strip=True)
+
+    patterns = [
+        r'([\d\s\u202f]+)\s+expériences vécues',
+        r'([\d\s\u202f]+)\s+avis',
+        r'([\d\s\u202f]+)\s+reviews'
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+
+        if match:
+            try:
+                return int(
+                    match.group(1)
+                    .replace(" ", "")
+                    .replace("\u202f", "")
+                )
+            except ValueError:
+                pass
+
+    return None
+
+
 def _extract_distance(card, raw_text: str) -> str | None:
     """Extrait la distance au centre depuis une carte."""
     dist_el = card.select_one('[data-testid="distance"]')
@@ -211,13 +242,15 @@ def _extract_price(card) -> int | None:
 # Scraping d'une ville
 # ──────────────────────────────────────────────
 
-def _scrape_city(driver, city: str, city_id: int, max_hotels: int) -> list:
+def _scrape_city(driver, city: str, city_id: int, max_hotels: int = None) -> list:
     """
-    Scrape les hôtels d'une ville :
-    1. Page de résultats → nom, score, distance, prix, URL
-    2. Page individuelle → coordonnées GPS, description
+    POC :
+    Scrape uniquement les informations visibles sur la page résultats Booking.
+    Aucun appel aux pages individuelles.
     """
-    checkin, checkout = "2026-07-10", "2026-07-12"
+
+    checkin, checkout = "2026-08-25", "2026-08-26"
+
     url = (
         f"https://www.booking.com/searchresults.fr.html?ss={city}"
         f"&checkin={checkin}&checkout={checkout}"
@@ -225,10 +258,10 @@ def _scrape_city(driver, city: str, city_id: int, max_hotels: int) -> list:
         f"&lang=fr"
     )
 
+    print(f"\nScraping {city}")
     driver.get(url)
     time.sleep(5)
 
-    # Fermer le pop-up de connexion si présent
     try:
         btn = driver.find_element(
             By.CSS_SELECTOR,
@@ -239,41 +272,90 @@ def _scrape_city(driver, city: str, city_id: int, max_hotels: int) -> list:
     except Exception:
         pass
 
-    soup  = BeautifulSoup(driver.page_source, "lxml")
-    cards = soup.select('[data-testid="property-card"]')[:max_hotels]
+    last_height = driver.execute_script(
+    "return document.body.scrollHeight"
+    )
+
+    for i in range(15):
+
+        driver.execute_script(
+            "window.scrollTo(0, document.body.scrollHeight);"
+        )
+
+        time.sleep(3)
+
+        new_height = driver.execute_script(
+            "return document.body.scrollHeight"
+        )
+
+        print(
+            f"Scroll {i+1} - hauteur={new_height}"
+        )
+
+        if new_height == last_height:
+            print("Fin du chargement")
+            break
+
+        last_height = new_height
+
+    soup = BeautifulSoup(driver.page_source, "lxml")
+
+    cards = soup.select('[data-testid="property-card"]')
+
+    print(f"Cartes trouvées : {len(cards)}")
+
+    if max_hotels:
+        cards = cards[:max_hotels]
+
     hotels = []
 
-    for card in cards:
+    for i, card in enumerate(cards, start=1):
+
         raw_text = card.get_text(separator="\n", strip=True)
-        name     = raw_text.split('\n')[0] if raw_text else None
+
+        name = raw_text.split("\n")[0] if raw_text else None
 
         if not name:
             continue
 
         hotel_url = _extract_hotel_url(card)
-        score     = _extract_score(card)
-        distance  = _extract_distance(card, raw_text)
+        score = _extract_score(card)
+        if score is None:
+            continue
+        review_count = _extract_review_count(card)
+        distance = _extract_distance(card, raw_text)
         price_eur = _extract_price(card)
 
-        # Visite page individuelle → GPS + description
-        details = get_hotel_details(driver, hotel_url)
-        time.sleep(random.uniform(1, 2))
-
         hotels.append({
-            "city_id":     city_id,
-            "city":        city,
-            "hotel_name":  name,
-            "url":         hotel_url,
-            "score":       score,
-            "distance":    distance,
-            "price_eur":   price_eur,
-            "lat":         details["lat"],
-            "lon":         details["lon"],
-            "description": details["description"],
+            "city_id": city_id,
+            "city": city,
+            "hotel_name": name,
+            "url": hotel_url,
+            "score": score,
+            "review_count": review_count,
+            "distance": distance,
+            "price_eur": price_eur
         })
 
-    return hotels
+    df_debug = pd.DataFrame(hotels)
 
+    print("\n=== APERCU ===")
+    print(
+        df_debug[
+            [
+                "hotel_name",
+                "score",
+                "review_count",
+                "distance",
+                "price_eur"
+            ]
+        ].head(20)
+    )
+
+    print("\n=== VALEURS MANQUANTES ===")
+    print(df_debug.isna().sum())
+
+    return hotels
 
 # ──────────────────────────────────────────────
 # Point d'entrée principal
@@ -323,3 +405,54 @@ def scrape_all_cities(
     _save_cache(df_result)
     print(f"\nTerminé : {len(df_result)} hôtels sauvegardés")
     return df_result
+
+
+def enrich_hotels_details(
+    df_hotels: pd.DataFrame,
+    headless: bool = True
+) -> pd.DataFrame:
+    """
+    Enrichit un DataFrame d'hôtels avec :
+    lat, lon, description
+
+    à partir de l'URL Booking.
+    """
+
+    driver = get_driver(headless=headless)
+
+    try:
+
+        details_list = []
+
+        total = len(df_hotels)
+
+        for i, (_, row) in enumerate(df_hotels.iterrows(), start=1):
+
+            print(
+                f"[{i}/{total}] {row['hotel_name']}",
+                flush=True
+            )
+
+            details = get_hotel_details(
+                driver,
+                row["url"]
+            )
+
+            details_list.append(details)
+
+            time.sleep(
+                random.uniform(1, 2)
+            )
+
+    finally:
+        driver.quit()
+
+    df_details = pd.DataFrame(details_list)
+
+    return pd.concat(
+        [
+            df_hotels.reset_index(drop=True),
+            df_details.reset_index(drop=True)
+        ],
+        axis=1
+    )

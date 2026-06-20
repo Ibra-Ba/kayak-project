@@ -45,6 +45,9 @@ def create_tables(engine) -> None:
             pop_moy       FLOAT,
             rain_total    FLOAT,
             humidity      FLOAT,
+            temp_norm     FLOAT,
+            pop_norm      FLOAT,
+            rain_norm     FLOAT,
             weather_score FLOAT,
             rank          INTEGER
         );
@@ -56,8 +59,10 @@ def create_tables(engine) -> None:
             hotel_name    VARCHAR(255),
             url           TEXT,
             score         FLOAT,
+            review_count  FLOAT,
             distance      VARCHAR(50),
             price_eur     INTEGER,
+            hotel_rank    FLOAT,
             lat           FLOAT,
             lon           FLOAT,
             description   TEXT
